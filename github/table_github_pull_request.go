@@ -115,43 +115,34 @@ func tableGitHubPullRequest() *plugin.Table {
 func tableGitHubPullRequestList(ctx context.Context, d *plugin.QueryData, h *plugin.HydrateData) (interface{}, error) {
 	quals := d.EqualsQuals
 	fullName := quals["repository_full_name"].GetStringValue()
-	owner, repo := parseRepoFullName(fullName)
+	// owner, repo := parseRepoFullName(fullName)
 
 	pageSize := adjustPageSize(75, d.QueryContext.Limit)
 
-	states := []githubv4.PullRequestState{githubv4.PullRequestStateOpen, githubv4.PullRequestStateClosed, githubv4.PullRequestStateMerged}
-	if quals["state"] != nil {
-		state := quals["state"].GetStringValue()
-		switch state {
-		case "OPEN":
-			states = []githubv4.PullRequestState{githubv4.PullRequestStateOpen}
-		case "CLOSED":
-			states = []githubv4.PullRequestState{githubv4.PullRequestStateClosed}
-		case "MERGED":
-			states = []githubv4.PullRequestState{githubv4.PullRequestStateMerged}
-		default:
-			plugin.Logger(ctx).Error("github_pull_request", "invalid filter", "state", state)
-			return nil, fmt.Errorf("invalid value for 'state' can only filter for 'OPEN', 'CLOSED' or 'MERGED', value provided was '%s'", state)
-		}
-	}
-
 	var query struct {
-		RateLimit  models.RateLimit
-		Repository struct {
-			PullRequests struct {
-				PageInfo   models.PageInfo
-				TotalCount int
-				Nodes      []models.PullRequest
-			} `graphql:"pullRequests(first: $pageSize, after: $cursor, states: $states)"`
-		} `graphql:"repository(owner: $owner, name: $name)"`
+		RateLimit models.RateLimit
+		Search    struct {
+			IssueCount githubv4.Int
+			PageInfo   models.PageInfo
+			Edges      []struct {
+				Node struct {
+					PullRequest models.PullRequest `graphql:"... on PullRequest"`
+				}
+			}
+		} `graphql:"search(query: $query, type: ISSUE, after: $cursor, first: $pageSize)"`
+		// Repository struct {
+		// 	PullRequests struct {
+		// 		PageInfo   models.PageInfo
+		// 		TotalCount int
+		// 		Nodes      []models.PullRequest
+		// 	} `graphql:"pullRequests(first: $pageSize, after: $cursor, states: $states)"`
+		// } `graphql:"repository(owner: $owner, name: $name)"`
 	}
 
 	variables := map[string]interface{}{
-		"owner":    githubv4.String(owner),
-		"name":     githubv4.String(repo),
+		"query":    githubv4.String(fmt.Sprintf("repo:%s is:pr created:2024-09-01..2024-11-11", fullName)),
 		"pageSize": githubv4.Int(pageSize),
 		"cursor":   (*githubv4.String)(nil),
-		"states":   states,
 	}
 	appendPullRequestColumnIncludes(&variables, d.QueryContext.Columns)
 
@@ -165,7 +156,8 @@ func tableGitHubPullRequestList(ctx context.Context, d *plugin.QueryData, h *plu
 			return nil, err
 		}
 
-		for _, issue := range query.Repository.PullRequests.Nodes {
+		for _, edge := range query.Search.Edges {
+			issue := edge.Node.PullRequest
 			d.StreamListItem(ctx, issue)
 
 			// Context can be cancelled due to manual cancellation or the limit has been hit
@@ -174,10 +166,10 @@ func tableGitHubPullRequestList(ctx context.Context, d *plugin.QueryData, h *plu
 			}
 		}
 
-		if !query.Repository.PullRequests.PageInfo.HasNextPage {
+		if !query.Search.PageInfo.HasNextPage {
 			break
 		}
-		variables["cursor"] = githubv4.NewString(query.Repository.PullRequests.PageInfo.EndCursor)
+		variables["cursor"] = githubv4.NewString(query.Search.PageInfo.EndCursor)
 	}
 
 	return nil, nil
